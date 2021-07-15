@@ -22,3 +22,4 @@ Possible types are:
  * **l**: symbolic link
  * **s**: socket
  * **D**: Solaris Door
+ * **?**: An unknown file type

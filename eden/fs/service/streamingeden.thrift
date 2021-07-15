@@ -21,17 +21,17 @@ enum FsEventType {
  */
 struct TraceEventTimes {
   // Nanoseconds since epoch.
-  1: i64 timestamp
+  1: i64 timestamp;
   // Nanoseconds since arbitrary clock base, used for computing request
   // durations between start and finish.
-  2: i64 monotonic_time_ns
+  2: i64 monotonic_time_ns;
 }
 
 struct RequestInfo {
   // The pid that originated this request.
-  1: optional eden.pid_t pid
+  1: optional eden.pid_t pid;
   // If available, the binary name corresponding to `pid`.
-  2: optional string processName
+  2: optional string processName;
 }
 
 struct FsEvent {
@@ -48,12 +48,26 @@ struct FsEvent {
   // See fuseRequest or prjfsRequest for the request opcode name.
   4: string arguments;
 
-  // Always defined on Linux and macOS, but marked optional to support Windows.
-  5: eden.FuseCall fuseRequest;
-  // To add Windows support, mark fuseRequest optional, and add:
+  // At most one of the *Request fields will be set, depending on the filesystem implementation.
+  5: optional eden.FuseCall fuseRequest;
+  10: optional eden.NfsCall nfsRequest;
+  // To add Windows support:
   // 6: optional eden.PrjfsCall prjfsRequest;
 
   8: RequestInfo requestInfo;
+
+  /**
+   * The result code sent back to the kernel.
+   *
+   * Positive is success, and, depending on the operation, may contain a nonzero result.
+   *
+   * If a FUSE request returns an inode which the kernel will reference, this field contains that inode numebr, so it can be correlated with future FUSE requests to that inode.
+   * field is set. This field can be used to link the lookup/create/mknod
+   * request to future FUSE requests on that inode.
+   *
+   * Negative indicates an error.
+   */
+  9: optional i64 result;
 }
 
 /*
@@ -64,9 +78,9 @@ struct FsEvent {
  * future.
  */
 
-const i64 FS_EVENT_READ = 1
-const i64 FS_EVENT_WRITE = 2
-const i64 FS_EVENT_OTHER = 4
+const i64 FS_EVENT_READ = 1;
+const i64 FS_EVENT_WRITE = 2;
+const i64 FS_EVENT_OTHER = 4;
 
 enum HgEventType {
   UNKNOWN = 0,
@@ -82,18 +96,18 @@ enum HgResourceType {
 }
 
 struct HgEvent {
-  1: TraceEventTimes times
+  1: TraceEventTimes times;
 
-  2: HgEventType eventType
-  3: HgResourceType resourceType
+  2: HgEventType eventType;
+  3: HgResourceType resourceType;
 
-  4: i64 unique
+  4: i64 unique;
 
   // HG manifest node ID as 40-character hex string.
-  5: string manifestNodeId
-  6: binary path
+  5: string manifestNodeId;
+  6: binary path;
 
-  7: optional RequestInfo requestInfo
+  7: optional RequestInfo requestInfo;
 }
 
 /**
@@ -123,7 +137,7 @@ service StreamingEdenService extends eden.EdenService {
    * method above.
    */
   stream<eden.JournalPosition> subscribeStreamTemporary(
-    1: eden.PathString mountPoint
+    1: eden.PathString mountPoint,
   );
 
   /**
@@ -135,7 +149,8 @@ service StreamingEdenService extends eden.EdenService {
    */
   stream<FsEvent> traceFsEvents(
     1: eden.PathString mountPoint,
-    2: i64 eventCategoryMask);
+    2: i64 eventCategoryMask,
+  );
 
   /**
    * Returns, in order, a stream of hg import requests for the given mount.
@@ -143,6 +158,5 @@ service StreamingEdenService extends eden.EdenService {
    * Each request has a unique ID and transitions through three states: queued,
    * started, and finished.
    */
-   stream<HgEvent> traceHgEvents(
-     1: eden.PathString mountPoint)
+  stream<HgEvent> traceHgEvents(1: eden.PathString mountPoint);
 }

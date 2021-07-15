@@ -23,6 +23,11 @@ option(BUILD_SHARED_LIBS
 # is generally discouraged.
 mark_as_advanced(BUILD_SHARED_LIBS)
 
+option(USE_SYS_PYTHON
+  "If enabled, prefers to use the system python"
+  ON
+)
+
 enable_testing()
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
@@ -124,6 +129,7 @@ include(CheckFunctionExists)
 include(CheckIncludeFiles)
 include(CheckStructHasMember)
 include(CheckSymbolExists)
+include(RustStaticLibrary)
 
 # configure_file wants us to define a separate file.  I'd rather not
 # have boilerplate for the same thing in two difference files, so we
@@ -178,7 +184,6 @@ endif ()
 # a 64-bit integer type, otherwise the mtime_us field renders as garbage
 # in the integration tests.
 foreach(wat_func
-    FSEventStreamSetExclusionPaths
     accept4
     backtrace
     backtrace_symbols
@@ -271,9 +276,9 @@ else()
 endif()
 
 configure_file(
-  thirdparty/jansson/jansson_config.h.in
-  thirdparty/jansson/jansson_config.h)
-include_directories(${CMAKE_CURRENT_BINARY_DIR}/thirdparty/jansson)
+  watchman/thirdparty/jansson/jansson_config.h.in
+  watchman/thirdparty/jansson/jansson_config.h)
+include_directories(${CMAKE_CURRENT_BINARY_DIR}/watchman/thirdparty/jansson)
 
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
@@ -357,44 +362,87 @@ else()
   find_program(YARN yarn)
 endif()
 
-# Why not `find_package(Python3)`?  On a system that has
-# python3, python3.6 and python3.7 that will select 3.7,
-# even though python3 -> python3.6.  On such a system we
-# want the python3/python3.6 selection, not the 3.7 selection
-find_program(PYTHON3 python3)
-if(PYTHON3)
-  set(PYOUT "${CMAKE_CURRENT_BINARY_DIR}/build/pytimestamp")
-  set(SETUP_PY "${CMAKE_CURRENT_SOURCE_DIR}/python/setup.py")
-  file(GLOB PYWATCHMAN_PY_SRCS "python/pywatchman/*.py")
-  add_custom_command(
-    COMMENT "Building pywatchman"
-    OUTPUT ${PYOUT}
-    DEPENDS ${PYWATCHMAN_PY_SRCS} "python/pywatchman/bser.c"
-    COMMAND ${CMAKE_COMMAND} -E env
-      CMAKE_CURRENT_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
-      CMAKE_CURRENT_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
-      ${PYTHON3} ${SETUP_PY} build
-    COMMAND ${CMAKE_COMMAND} -E touch ${PYOUT}
-  )
-  add_custom_target(pybuild ALL DEPENDS ${PYOUT})
-  install(CODE "
-    execute_process(COMMAND
-      ${CMAKE_COMMAND} -E env
-        CMAKE_CURRENT_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
-        ${PYTHON3} ${SETUP_PY} install
-        --root $ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}
-      RESULT_VARIABLE STATUS)
-    if (NOT STATUS STREQUAL 0)
-      message(FATAL_ERROR \"pywatchman install failed\")
-    endif()
-  ")
-  include(FBPythonBinary)
-  add_subdirectory(python)
-  add_subdirectory(tests/integration)
+
+if(USE_SYS_PYTHON)
+  if(NOT WIN32)
+    # Sometimes the environment has a Python installation earlier in the
+    # PATH that is not suitable for building extensions. Prefer the
+    # primary system installation.
+    set(Python3_ROOT_DIR /usr/bin)
+  endif()
+
+  find_package(Python3 COMPONENTS Interpreter Development)
+
+  if(NOT Python3_Interpreter_FOUND)
+    unset(Python3_ROOT_DIR)
+    find_package(Python3 COMPONENTS Interpreter Development)
+  endif()
+else()
+  # Why not `find_package(Python3)`?  On a system that has
+  # python3, python3.6 and python3.7 that will select 3.7,
+  # even though python3 -> python3.6.  On such a system we
+  # want the python3/python3.6 selection, not the 3.7 selection
+  find_program(PYTHON3 python3 PATHS /usr/bin)
 endif()
 
-if(PYTHON3 AND NODE AND YARN)
-  add_subdirectory(node/bser)
+if(Python3_Development_FOUND OR PYTHON3)
+  set(PYOUT "${CMAKE_CURRENT_BINARY_DIR}/build/pytimestamp")
+  set(SETUP_PY "${CMAKE_CURRENT_SOURCE_DIR}/watchman/python/setup.py")
+  file(GLOB PYWATCHMAN_PY_SRCS "watchman/python/pywatchman/*.py")
+  if(Python3_Development_FOUND)
+    add_custom_command(
+      COMMENT "Building pywatchman"
+      OUTPUT ${PYOUT}
+      DEPENDS ${PYWATCHMAN_PY_SRCS} "watchman/python/pywatchman/bser.c"
+      COMMAND ${CMAKE_COMMAND} -E env
+        CMAKE_CURRENT_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+        CMAKE_CURRENT_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+        ${Python3_EXECUTABLE} ${SETUP_PY} build
+      COMMAND ${CMAKE_COMMAND} -E touch ${PYOUT}
+    )
+    add_custom_target(pybuild ALL DEPENDS ${PYOUT})
+    install(CODE "
+      execute_process(COMMAND
+        ${CMAKE_COMMAND} -E env
+          CMAKE_CURRENT_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+          ${Python3_EXECUTABLE} ${SETUP_PY} install
+          --root $ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}
+        RESULT_VARIABLE STATUS)
+      if (NOT STATUS STREQUAL 0)
+        message(FATAL_ERROR \"pywatchman install failed\")
+      endif()
+    ")
+  else()
+    add_custom_command(
+      COMMENT "Building pywatchman"
+      OUTPUT ${PYOUT}
+      DEPENDS ${PYWATCHMAN_PY_SRCS} "watchman/python/pywatchman/bser.c"
+      COMMAND ${CMAKE_COMMAND} -E env
+        CMAKE_CURRENT_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+        CMAKE_CURRENT_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+        ${PYTHON3} ${SETUP_PY} build
+      COMMAND ${CMAKE_COMMAND} -E touch ${PYOUT}
+    )
+    add_custom_target(pybuild ALL DEPENDS ${PYOUT})
+    install(CODE "
+      execute_process(COMMAND
+        ${CMAKE_COMMAND} -E env
+          CMAKE_CURRENT_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+          ${PYTHON3} ${SETUP_PY} install
+          --root $ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}
+        RESULT_VARIABLE STATUS)
+      if (NOT STATUS STREQUAL 0)
+        message(FATAL_ERROR \"pywatchman install failed\")
+      endif()
+    ")
+  endif()
+  include(FBPythonBinary)
+  add_subdirectory(watchman/python)
+  add_subdirectory(watchman/tests/integration)
+
+  if(NODE AND YARN)
+    add_subdirectory(watchman/node/bser)
+  endif()
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
@@ -403,7 +451,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     message(FATAL_ERROR "watchman requires a 64bit target architecture.")
   endif()
   add_definitions(-D_CRT_SECURE_NO_WARNINGS=1)
-  include_directories(${CMAKE_CURRENT_SOURCE_DIR}/winbuild)
+  include_directories(${CMAKE_CURRENT_SOURCE_DIR}/watchman/winbuild)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Zi /Zo /MP /MT /Oi /EHsc /GL-")
   set(CMAKE_SHARED_LINKER_FLAGS
     "${CMAKE_SHARED_LINKER_FLAGS} /DEBUG /MT /OPT:NOREF")
@@ -468,54 +516,56 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
 endif()
 
 add_library(wildmatch STATIC
-  thirdparty/wildmatch/wildmatch.c
-  thirdparty/wildmatch/wildmatch.h
+  watchman/thirdparty/wildmatch/wildmatch.c
+  watchman/thirdparty/wildmatch/wildmatch.h
 )
-add_library(log STATIC PubSub.cpp LogConfig.cpp Logging.cpp)
+add_library(log STATIC watchman/PubSub.cpp watchman/LogConfig.cpp watchman/Logging.cpp)
 target_link_libraries(log third_party_deps)
-add_library(hash STATIC hash.cpp)
+add_library(hash STATIC watchman/hash.cpp)
 target_link_libraries(hash third_party_deps)
-add_library(err STATIC root/poison.cpp root/warnerr.cpp)
+add_library(err STATIC watchman/root/poison.cpp watchman/root/warnerr.cpp)
 target_link_libraries(err third_party_deps)
-add_library(jansson_utf STATIC thirdparty/jansson/utf.cpp)
+add_library(jansson_utf STATIC watchman/thirdparty/jansson/utf.cpp)
 
-add_library(string STATIC string.cpp)
+add_library(string STATIC watchman/string.cpp)
 target_link_libraries(string jansson_utf hash third_party_deps)
 
 add_library(jansson STATIC
-thirdparty/jansson/dump.cpp
-thirdparty/jansson/error.cpp
-thirdparty/jansson/load.cpp
-thirdparty/jansson/strconv.cpp
-thirdparty/jansson/value.cpp
+watchman/thirdparty/jansson/dump.cpp
+watchman/thirdparty/jansson/error.cpp
+watchman/thirdparty/jansson/load.cpp
+watchman/thirdparty/jansson/strconv.cpp
+watchman/thirdparty/jansson/value.cpp
 )
 target_link_libraries(jansson string third_party_deps)
 
 list(APPEND testsupport_sources
-ChildProcess.cpp
-FileDescriptor.cpp
-FileInformation.cpp
-Pipe.cpp
-ThreadPool.cpp
-bser.cpp
-cfg.cpp
-expflags.cpp
-ignore.cpp
-opendir.cpp
-pending.cpp
-time.cpp
-stream.cpp
-stream_unix.cpp
+watchman/ChildProcess.cpp
+watchman/FileDescriptor.cpp
+watchman/FileInformation.cpp
+watchman/FlagMap.cpp
+watchman/PendingCollection.cpp
+watchman/Pipe.cpp
+watchman/ThreadPool.cpp
+watchman/WatchmanConfig.cpp
+watchman/bser.cpp
+watchman/ignore.cpp
+watchman/opendir.cpp
+watchman/time.cpp
+watchman/stream.cpp
+watchman/stream_unix.cpp
+watchman/root/dir.cpp
+watchman/root/file.cpp
 )
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
   list(APPEND testsupport_sources
-winbuild/time.cpp
-winbuild/backtrace.cpp
-winbuild/errmap.cpp
-winbuild/pathmap.cpp
-winbuild/posix_spawn.cpp
-stream_win.cpp
+watchman/winbuild/time.cpp
+watchman/winbuild/backtrace.cpp
+watchman/winbuild/errmap.cpp
+watchman/winbuild/pathmap.cpp
+watchman/winbuild/posix_spawn.cpp
+watchman/stream_win.cpp
   )
 endif()
 
@@ -548,124 +598,131 @@ if (ENABLE_EDEN_SUPPORT)
 endif()
 
 list(APPEND watchman_sources
-ChildProcess.cpp
-Clock.cpp
-CommandRegistry.cpp
-ContentHash.cpp
-CookieSync.cpp
-FileDescriptor.cpp
-FileInformation.cpp
-InMemoryView.cpp
-LocalFileResult.cpp
-Pipe.cpp
+watchman/ChildProcess.cpp
+watchman/Clock.cpp
+watchman/CommandRegistry.cpp
+watchman/ContentHash.cpp
+watchman/CookieSync.cpp
+watchman/Errors.cpp
+watchman/FileDescriptor.cpp
+watchman/FileInformation.cpp
+watchman/FlagMap.cpp
+watchman/FSDetect.cpp
+watchman/InMemoryView.cpp
+watchman/LocalFileResult.cpp
+watchman/PendingCollection.cpp
+watchman/Pipe.cpp
+watchman/ProcessLock.cpp
 # PubSub.cpp  (in liblog)
-QueryableView.cpp
-SignalHandler.cpp
-SymlinkTargets.cpp
-ThreadPool.cpp
-bser.cpp
-cfg.cpp
-checksock.cpp
-clientmode.cpp
-error_category.cpp
-expflags.cpp
-fstype.cpp
-groups.cpp
+watchman/QueryableView.cpp
+watchman/SignalHandler.cpp
+watchman/SymlinkTargets.cpp
+watchman/ThreadPool.cpp
+watchman/WatchmanConfig.cpp
+watchman/bser.cpp
+watchman/checksock.cpp
+watchman/clientmode.cpp
+watchman/groups.cpp
 # hash.cpp (in libhash)
-ignore.cpp
-json.cpp
-launchd.cpp
-listener-user.cpp
-listener.cpp
-main.cpp
-opendir.cpp
-opt.cpp
-pending.cpp
-perf.cpp
-sockname.cpp
-spawn.cpp
-state.cpp
-stream.cpp
-stream_unix.cpp
-stream_stdout.cpp
+watchman/ignore.cpp
+watchman/json.cpp
+watchman/launchd.cpp
+watchman/listener-user.cpp
+watchman/listener.cpp
+watchman/main.cpp
+watchman/opendir.cpp
+watchman/opt.cpp
+watchman/perf.cpp
+watchman/sockname.cpp
+watchman/spawn.cpp
+watchman/state.cpp
+watchman/stream.cpp
+watchman/stream_unix.cpp
+watchman/stream_stdout.cpp
 # string.cpp (in libstring)
-time.cpp
-tmp.cpp
-query/base.cpp
-query/dirname.cpp
-query/empty.cpp
-query/eval.cpp
-query/fieldlist.cpp
-query/glob.cpp
-query/intcompare.cpp
-query/match.cpp
-query/name.cpp
-query/parse.cpp
-query/pcre.cpp
-query/since.cpp
-query/suffix.cpp
-query/type.cpp
-cmds/debug.cpp
-cmds/find.cpp
+watchman/time.cpp
+watchman/tmp.cpp
+watchman/query/base.cpp
+watchman/query/dirname.cpp
+watchman/query/empty.cpp
+watchman/query/eval.cpp
+watchman/query/fieldlist.cpp
+watchman/query/glob.cpp
+watchman/query/intcompare.cpp
+watchman/query/match.cpp
+watchman/query/name.cpp
+watchman/query/parse.cpp
+watchman/query/pcre.cpp
+watchman/query/since.cpp
+watchman/query/suffix.cpp
+watchman/query/type.cpp
+watchman/cmds/debug.cpp
+watchman/cmds/find.cpp
 # cmds/heapprof.cpp
-cmds/info.cpp
-cmds/log.cpp
-cmds/query.cpp
-cmds/reg.cpp
-cmds/since.cpp
-cmds/state.cpp
-cmds/subscribe.cpp
-cmds/trigger.cpp
-cmds/watch.cpp
-root/ageout.cpp
-root/crawler.cpp
-root/dir.cpp
-root/file.cpp
-root/init.cpp
-root/iothread.cpp
-root/notifythread.cpp
-# root/poison.cpp (in liberr)
-root/reap.cpp
-root/resolve.cpp
-root/stat.cpp
-root/symlink.cpp
-root/sync.cpp
-root/threading.cpp
-root/vcs.cpp
+watchman/cmds/info.cpp
+watchman/cmds/log.cpp
+watchman/cmds/query.cpp
+watchman/cmds/reg.cpp
+watchman/cmds/since.cpp
+watchman/cmds/state.cpp
+watchman/cmds/subscribe.cpp
+watchman/cmds/trigger.cpp
+watchman/cmds/watch.cpp
+watchman/root/ageout.cpp
+watchman/root/crawler.cpp
+watchman/root/dir.cpp
+watchman/root/file.cpp
+watchman/root/init.cpp
+watchman/root/iothread.cpp
+watchman/root/notifythread.cpp
+watchman/# root/poison.cpp (in liberr)
+watchman/root/reap.cpp
+watchman/root/resolve.cpp
+watchman/root/stat.cpp
+watchman/root/symlink.cpp
+watchman/root/sync.cpp
+watchman/root/threading.cpp
+watchman/root/vcs.cpp
 # root/warnerr.cpp (in liberr)
-root/watchlist.cpp
-saved_state/LocalSavedStateInterface.cpp
-saved_state/SavedStateInterface.cpp
-scm/Mercurial.cpp
-scm/SCM.cpp
-watcher/auto.cpp
-watcher/fsevents.cpp
-watcher/inotify.cpp
-watcher/kqueue.cpp
-watcher/portfs.cpp
+watchman/root/watchlist.cpp
+watchman/saved_state/LocalSavedStateInterface.cpp
+watchman/saved_state/SavedStateFactory.cpp
+watchman/saved_state/SavedStateInterface.cpp
+watchman/scm/Mercurial.cpp
+watchman/scm/SCM.cpp
+watchman/watcher/Watcher.cpp
+watchman/watcher/WatcherRegistry.cpp
+watchman/watcher/fsevents.cpp
+watchman/watcher/inotify.cpp
+watchman/watcher/kqueue.cpp
+watchman/watcher/portfs.cpp
+watchman/watcher/kqueue_and_fsevents.cpp
 )
 
 if (ENABLE_EDEN_SUPPORT)
   # We currently only support talking to eden on posix systems
-  list(APPEND watchman_sources watcher/eden.cpp)
+  list(APPEND watchman_sources watchman/watcher/eden.cpp)
 endif()
 
 if (WIN32)
   list(APPEND watchman_sources
-stream_win.cpp
-watcher/win32.cpp
-winbuild/errmap.cpp
-winbuild/pathmap.cpp
-winbuild/mkdir.cpp
-winbuild/dir.cpp
-winbuild/time.cpp
-winbuild/backtrace.cpp
-winbuild/getopt_long.cpp
-winbuild/posix_spawn.cpp
+watchman/stream_win.cpp
+watchman/watcher/win32.cpp
+watchman/winbuild/errmap.cpp
+watchman/winbuild/pathmap.cpp
+watchman/winbuild/mkdir.cpp
+watchman/winbuild/dir.cpp
+watchman/winbuild/time.cpp
+watchman/winbuild/backtrace.cpp
+watchman/winbuild/getopt_long.cpp
+watchman/winbuild/posix_spawn.cpp
   )
 endif()
 
 add_executable(watchman ${watchman_sources})
+set_target_properties(watchman PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
 target_link_libraries(
   watchman
   log
@@ -678,7 +735,7 @@ target_link_libraries(
 )
 
 if (WIN32)
-  add_subdirectory(thirdparty/deelevate_binding)
+  add_subdirectory(watchman/thirdparty/deelevate_binding)
   target_link_libraries(
     watchman
     libdeelevate
@@ -694,6 +751,8 @@ if (ENABLE_EDEN_SUPPORT)
 endif()
 
 install(TARGETS watchman RUNTIME DESTINATION bin)
+
+add_subdirectory(watchman/cli)
 
 set(tests)
 # Helper function to define a unit test executable
@@ -715,29 +774,38 @@ add_custom_target(check
   DEPENDS ${tests}
   COMMAND ${CMAKE_CTEST_COMMAND})
 
-if(PYTHON3)
-  if(WIN32)
-    add_executable(susres winbuild/susres.cpp)
+if(Python3_Interpreter_FOUND OR PYTHON3)
+  if (WIN32)
+    add_executable(susres watchman/winbuild/susres.cpp)
     add_custom_target(make_susres ALL DEPENDS susres)
   endif()
 
-  # The `integration` target runs the unit tests and integration tests
-  add_custom_target(integration
+  if(Python3_Interpreter_FOUND)
+    # The `integration` target runs the unit tests and integration tests
+    add_custom_target(integration
+      DEPENDS pybuild check
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/runtests.py
+        --watchman-path ${CMAKE_CURRENT_BINARY_DIR}/watchman
+        --pybuild-dir ${CMAKE_CURRENT_BINARY_DIR}/watchman/python
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  else()
+    add_custom_target(integration
     DEPENDS pybuild check
     COMMAND ${PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/runtests.py
       --watchman-path ${CMAKE_CURRENT_BINARY_DIR}/watchman
       --pybuild-dir ${CMAKE_CURRENT_BINARY_DIR}/python
       WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  endif()
 endif()
 
-t_test(art tests/art_test.cpp)
-t_test(ignore tests/ignore_test.cpp)
-t_test(pending tests/pending_test.cpp)
-t_test(string tests/string_test.cpp)
-t_test(log tests/log.cpp)
-t_test(bser tests/bser.cpp)
-t_test(wildmatch tests/wildmatch_test.cpp)
-t_test(childproc tests/childproc.cpp)
-t_test(result tests/ResultTest.cpp)
-t_test(cache tests/CacheTest.cpp)
-t_test(MapUtilTest tests/MapUtilTest.cpp)
+t_test(art watchman/tests/art_test.cpp)
+t_test(ignore watchman/tests/ignore_test.cpp)
+t_test(PendingCollectionTest watchman/tests/PendingCollectionTest.cpp)
+t_test(string watchman/tests/string_test.cpp)
+t_test(log watchman/tests/log.cpp)
+t_test(bser watchman/tests/bser.cpp)
+t_test(wildmatch watchman/tests/wildmatch_test.cpp)
+t_test(childproc watchman/tests/childproc.cpp)
+t_test(result watchman/tests/ResultTest.cpp)
+t_test(cache watchman/tests/CacheTest.cpp)
+t_test(MapUtilTest watchman/tests/MapUtilTest.cpp)

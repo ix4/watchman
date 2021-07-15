@@ -23,6 +23,11 @@ that your particular installation may locate it elsewhere.   In addition,
 the environmental variable `$WATCHMAN_CONFIG_FILE` will override the
 default location.
 
+If the global configuration file does not exist, Watchman will fall back
+on that path with ".default" appended (e.g. /etc/watchman.json.default).
+This allows the Watchman system package to provide different configuration
+defaults, like setting enforce_root_files to true.
+
 Changes to the `.watchmanconfig` or `/etc/watchman.json` files are not picked
 up automatically; you will need to remove and re-add the watch (for
 `.watchmanconfig`) or restart watchman (for `/etc/watchman.json`) for those
@@ -263,6 +268,16 @@ original strategy of recrawling the watched directory tree is used instead.
 
 The default changed to `true`.  In addition, this resync strategy is now
 also applied to `kFSEventStreamEventFlagKernelDropped` events.
+
+### prefer_split_fsevents_watcher
+
+This is macOS specific.
+
+Defaults to `false`. If set to `true`, Watchman will use several FSEvents streams
+to watch a directory hierarchy instead of a single stream. This has been shown
+to significantly reduce the number of `kFSEventStreamEventFlagUserDropped`
+events for workflows issuing heavy writes to a top-level directory that is
+listed in [ignore_dirs](#ignore_dirs).
 
 ### idle_reap_age_seconds
 
